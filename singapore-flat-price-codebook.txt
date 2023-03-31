@@ -1,0 +1,11 @@
+* month: The registration month of resale
+* town: The name of the town that the flat is located 
+* flat_type: Number of rooms of the flat
+* block: Block number of the flat
+* storey_range: The story range of the flat
+* floor_area_sqm: The area in square meters of the flat
+* flat_model: The model of the flat
+* lease_commence_date: The year the lease starts
+* resale_price: Price of flat in Singapore Dollars
+* remaining_years : The remaining lease of the flat in years
+* years: The registration year of resale
