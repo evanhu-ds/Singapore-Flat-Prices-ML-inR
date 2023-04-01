@@ -1,0 +1,551 @@
+---
+title: "Building a Machine Learning Model to Predict the Price of Singapore Flats"
+author: "Evan Hu"
+date: "2022-11-19"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    toc: yes
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message= FALSE, warning = FALSE)
+```
+
+## Introduction 
+
+The purpose of this project is to use machine learning algorithms to create a model that will predict Singapore flat prices and to assess which variables are important for determining flat prices. We will be implementing different techniques to create the most accurate model for this regression problem. 
+
+### Singapore
+
+Singapore, or officially the Republic of Singapore, is a sovereign island country and city state in Southeast Asia (directly south of Malaysia). It's a multicultural region that's a global financial center and has the world's highest percentage of millionaires. Property prices in Singapore are among the world's most expensive, and the city state has been ranked as one of the world's most expensive cities. Singapore has a population of over 5.4 million people, and many of them live in high rise apartments due to the scarcity of land. Flats is another word for apartments.
+
+![Map of Singapore](https://east-usa.com/world/images/Singapore.jpg){width="350"}
+
+![Marina Bay Sands in Singapore](https://d2908q01vomqb2.cloudfront.net/9e6a55b6b4563e652a23be9d623ca5055c356940/2021/11/30/singapore-marina-space-strategic-intent-cooperation-aws-1200x600-1.jpg){width="400"}
+
+![Flats in Singapore](https://assets.bwbx.io/images/users/iqjWHBFdfxIU/in655UyxO7U0/v1/1200x-1.jpg){width="350"}
+
+### Why this topic?
+
+Singapore is a great city, rich with history, culture, and fantastic architecture. I still haven't visited Singapore yet, but if given the chance, I'd love to visit Singapore. It'd also be a dream come true if I'm able to purchase property and settle down in Singapore in the future. However, for now, this project can help me and others find out more about the important features that determine flat prices in Singapore while learning more about machine learning models!
+
+### Loading Data and Packages
+
+This project uses a dataset from Kaggle[, which contains data on Singapore flat prices between 2017 to 2021](https://www.kaggle.com/datasets/syedasimalishah/singapore-property-prices-from-2017-to-2021). Here is a list of the variables that comes with the dataset:
+
+* `month`: The registration month of resale with year 
+* `town`: The name of the town that the flat is located 
+* `flat_type`: Number of rooms of the flat
+* `block`: Block number of the flat
+* `street_name`: The name of the street of the flat
+* `storey_range`: The story range of the flat
+* `floor_area_sqm`: The area in square meters of the flat
+* `flat_model`: The model of the flat
+* `lease_commence_date`: The year the lease starts
+* `remaining_lease`: The remaining lease of the flat
+* `resale_price`: Price of flat in Singapore Dollars
+
+First, since we are working with R software, we load some packages necessary for our analysis of the data as well as the data itself.
+
+```{r class.source = 'fold-show'}
+# load packages
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(corrplot)
+library(kknn)
+library(ISLR)
+library(ISLR2)
+library(glmnet)
+library(randomForest)
+library(xgboost)
+library(rpart.plot)
+library(vip)
+library(ranger)
+
+# load data
+sg_flat <- read_csv("/Users/evanhu/Documents/UCSB Courses/Y4Q1/PSTAT 131/project/Data/flat-prices.csv", show_col_types = FALSE)
+```
+
+## Data Cleaning 
+
+The downloaded data is very tidy and there are no missing values as shown by running the following code. Although this dataset doesn't need it, for the sake of practice, we will also clean names. 
+
+```{r class.source = 'fold-show'}
+sg_flat <- clean_names(sg_flat)
+
+table(is.na(sg_flat)) # no NA values in data set 
+```
+
+Then, we will convert the categorical predictors to factors. 
+
+```{r class.source = 'fold-show'}
+sg_flat$town <- as.factor(sg_flat$town)
+sg_flat$flat_type <- as.factor(sg_flat$flat_type)
+sg_flat$block <- as.factor(sg_flat$block)
+sg_flat$storey_range <- as.factor(sg_flat$storey_range)
+sg_flat$flat_model <- as.factor(sg_flat$flat_model)
+```
+
+Using the `month` variable, we will add a `year` column and overwrite the current `month` column to actually reflect month (so it's not both year and month). 
+
+```{r class.source = 'fold-show'}
+sg_flat$year <-strsplit(sg_flat$month, '-') %>% sapply('[[',1) %>% as.numeric
+sg_flat$month <-strsplit(sg_flat$month, '-') %>% sapply('[[',2) %>% as.numeric
+```
+
+Furthermore, we use `remaining_lease` to create a numeric variable `remaining_years`. After creating `remaining_years`, we will remove `remaining_lease` because `remaining_years` provides the same information but in a neat simple numeric format. We will also remove `street_name` because it's not an important variable. 
+
+```{r class.source = 'fold-show'}
+a <- c()
+b <- c()
+for (i in seq_len(nrow(sg_flat))){
+    x <- strsplit(sg_flat$remaining_lease[i],' ') %>% unlist()
+    a <- c(a,x[1])
+    if(!is_empty(x[3])==TRUE){
+        b <- c(b,x[3])}
+    else{b <- c(b,0)}}
+
+a <- a %>% as.numeric()
+b <- b %>% as.numeric()
+b[is.na(b)] <- 0
+d <- (a*12+b)/12 
+d <- round(d,1)
+
+sg_flat$remaining_years <- d # create new variable
+
+sg_flat <- select(sg_flat, -remaining_lease, -street_name) # remove unnecessary variables
+```
+
+### Train/Test Split
+
+Before we perform exploratory data analysis (EDA) and begin modeling our data, we need to train/test split our data. We also set a random seed so that our results are reproducible. The data was split into 80% training and 20% testing. We used stratified sampling because the `resale_prices` distribution is skewed (the histogram for `resale_prices` can be found in the EDA section). Since we will be testing our final model on the testing set, the data is split before performing EDA as we do not want to know anything about our testing set.  
+
+
+```{r class.source = 'fold-show'}
+# set seed so our results are reproducible 
+set.seed(123)
+
+sg_flat_split <- initial_split(sg_flat, prop = 0.8, strata = resale_price)
+
+sg_flat_train <- training(sg_flat_split) # training split
+sg_flat_test <- testing(sg_flat_split) # testing split
+
+# write out the training and testing set
+write.csv(sg_flat_train, "/Users/evanhu/Documents/UCSB Courses/Y4Q1/PSTAT 131/project/Data/Processed/sg-flat-train.csv", row.names=FALSE)
+write.csv(sg_flat_test, "/Users/evanhu/Documents/UCSB Courses/Y4Q1/PSTAT 131/project/Data/Processed/sg-flat-test.csv", row.names=FALSE)
+
+dim(sg_flat_train) # check number of observations in training set
+
+dim(sg_flat_test) # check number of observations in testing set
+```
+
+There are 73,814 observations in our training dataset and 18,456 observations in our testing set. 
+
+## Exploratory Data Analysis 
+
+We will perform exploratory data analysis on the entire training set (73,814 observations). Each observation represents a flat in Singapore. To get an overview of our variables, we can run the following code:
+
+```{r class.source = 'fold-show'}
+summary(sg_flat_train)
+```
+
+We are given summary statistics for numeric variables like `year`, `floor_area_sqm`, and `resale_price`. For factors like `town`, `flat_type`, `flat_model`, and `storey_range`, the function provides frequency of the most frequent levels. Though this helps us get a better sense of our data and variables, graphs and plots are definitely more useful in identifying trends and relationships in our data. So let's move on to some useful data visualizations!
+
+### Resale Price 
+
+`resale_price` is our response variable. Here is the distribution of `resale_price`.
+
+```{r}
+ggplot(sg_flat_train, aes(x=resale_price))+
+  geom_histogram(bins=60)+
+  labs(title = "Histogram of Resale Price")
+
+```
+
+The distribution is rightward-skewed. Let's see the distribution of flat prices by `year`. 
+
+```{r}
+ggplot(sg_flat_train, aes(x=resale_price)) +
+  geom_histogram(bins = 30) +
+  facet_wrap(~year, scales = "free_y") +
+  labs(title = "Histogram of Resale Price by Year")
+```
+
+The distributions all look relatively the same except that the distribution for 2021 seems to have a higher mean than the other years. We can confirm this by plotting the average annual flat prices. 
+
+```{r}
+sg_flat_train %>% 
+  group_by(year) %>% 
+  summarize(avgPrice = round(mean(resale_price), 2)) %>%
+  ggplot(aes(x=year, y=avgPrice))+
+  geom_col()+
+  geom_text(aes(y=avgPrice+1e+04, label=avgPrice), color = 'blue')+
+  labs(title = "Average Annual Flat Price in Singapore", x = "Year", y = "Average Price in SG Dollars")
+```
+
+On average, 2021 has higher `resale_price` than the other years. We can also notice a slight decline in the mean between 2017-2019 before an increase in mean from 2020-2021. 
+
+### Correlation Matrix 
+
+Using a correlation matrix, we can quickly see the relationships between our numeric variables.
+
+```{r}
+sg_flat_train %>% 
+  select_if(is.numeric) %>% 
+  cor(use="complete.obs") %>% 
+  corrplot(type = 'lower', diag = FALSE, method = 'number')
+```
+
+Our data only has 6 numeric variables, including our response variable. Mostly, there is weak to no correlation between most of the numeric variables. The response variable seems strongly positively correlated with `floor_area_sqm` and slightly positively correlated with `lease_commence_date`. This makes sense as property floor area is bound to have a positive correlation with property price. `remaining_years` and `lease_commence_date` have a correlation coefficient of 1. Thus, we will remove `remaining_years` from model fitting because it imparts the same information as `lease_commence_date`, and we do not want multicollinearity in our models. `lease_commence_date` is chosen over `remaining_years` because `lease_commence_date` has a higher correlation with the response variable. From the correlation matrix, we can conclude that `month` does not have to be included in our models because it seems to have no correlation with `resale_price`. Though `year` has a very weak positive correlation with `resale_price`, we will include the variable in model building because our histograms from above indicated that flat prices in 2021 were noticeably higher on average than other years. 
+
+### Flat Type
+
+Now, let's move onto our factors. From the plots below, we can see that `flat_type` seems to determine the general price range of flats. Clearly, "1 ROOM" flats are the cheapest, and "MULTI-GENERATIONAL" flats are the most expensive. There is a clear ordering of cheapest to most expensive in the levels of the factor `flat_type`. 
+
+```{r}
+sg_flat_train %>% 
+  group_by(flat_type, year) %>% 
+  summarize(
+    avg_price = mean(resale_price)) %>% 
+  ggplot(aes(year, avg_price)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~flat_type) +
+  labs(
+    title = "Average Price of Flats Per Year by Flat Type",
+    y = "Average Price in SG Dollars"
+  )
+```
+
+### Town 
+
+There are 26 towns. The towns each have a steady range of average flat prices over the years. Though most towns are in the 4-500,000 Singapore dollars average price range, there are some towns with significantly higher ranges like "BUKIT TIMAH" and "BISHAN". Thus, `town` is a important predictor to consider in our models, which makes sense as location of a property is an important feature that dictates how much that property can sell for. Likewise, `block` is an indicator of location of a property. However, `block` has too many levels, and to keep our model simpler, we will not include `block` in our models. 
+
+```{r}
+sg_flat_train %>% 
+  group_by(town, year) %>% 
+  summarize(
+    avg_price = mean(resale_price)) %>% 
+  ggplot(aes(year, avg_price)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~town) +
+  labs(title = "Average Price of Flats Per Year by Town",
+    y = "Average Price in SG Dollars")
+```
+
+### Flat Model
+
+Much like `flat_type`, it should be obvious that `flat_model` would be important in determining flat prices. 
+
+```{r}
+sg_flat_train %>% 
+  group_by(flat_model, year) %>% 
+  summarize(
+    avg_price = mean(resale_price)) %>% 
+  ggplot(aes(year, avg_price)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~flat_model) +
+  labs(title = "Average Price of Flats Per Year by Flat Model",
+    y = "Average Price in SG Dollars")
+```
+
+### Storey Range
+
+Storey (British English), or story (American English), is another important feature to consider when valuing the price of flats. Since Singapore used to be a British colony, we will go with the British spelling storey. As expected, the higher the storey the pricer the flat, which the following plots show. 
+
+```{r}
+sg_flat_train %>% 
+  group_by(storey_range, year) %>% 
+  summarize(
+    avg_price = mean(resale_price)) %>% 
+  ggplot(aes(year, avg_price)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~storey_range) +
+  labs(title = "Average Price of Flats Per Year by Storey Range",
+    y = "Average Price in SG Dollars")
+```
+
+## Model Building 
+
+After performing EDA, we can begin building our models as now we know more about how the variables impact the price of flats in Singapore. 
+
+### Recipe for the Models
+
+Since we will be using the same predictors, response, and model conditions for our models, we will create one central recipe to use for model building. After performing data cleaning and EDA, we've transformed and removed some predictors from our datasets. We will only include the important predictors in our recipe. We will make our categorical variables into dummy variables. We will also center and scale our data. 
+
+```{r class.source = 'fold-show'}
+sg_flat_recipe <- recipe(resale_price ~ town + flat_type + storey_range + floor_area_sqm + flat_model + lease_commence_date + year, data = sg_flat_train) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+# did not include variables month, remaining_years, and block
+```
+
+### K-Fold Cross Validation
+
+We will be using cross validation to build our models. More specifically, since the response variable `resale_price` is skewed, we will use stratified cross validation. Thus, we will fold our training data into 10 folds and stratify on `resale_price`. 
+
+```{r class.source = 'fold-show'}
+sg_flat_folds <- vfold_cv(sg_flat_train, k = 10, strata = resale_price)
+```
+
+Due to the large amount of categorical predictors in our dataset, we will be running repeated cross fold validation on the following three machine learning models:
+
+* Random Forest 
+* Boosted Tree
+* K-Nearest Neighbors 
+
+### Random Forest 
+
+For our random forest model, we will tune `mtry`, `min_n`, and `trees`. `mtry` is the number of predictors that will be randomly selected at each split during the creation of the tree models. `trees` is the number of trees contained in each random forest. `min_n` is the minimum number of observations in the nodes. The recursive binary split stops when each terminal node has less than the minimum number of observations. As our response variable `resale_price` is a numeric variable, we set `mode` to `"regression"`. We use the `"ranger"` engine. We store the model and recipe in a workflow. 
+
+```{r class.source = 'fold-show'}
+rf_model <- rand_forest(
+  mtry = tune(),
+  min_n = tune(),
+  trees = tune(),
+  mode = "regression") %>% 
+  set_engine("ranger")
+
+rf_workflow <- workflow() %>% 
+  add_model(rf_model) %>% 
+  add_recipe(sg_flat_recipe)
+```
+
+Next, we set up the tuning grid. Since we have 7 predictors, we tune `mtry` between 1-7. As the dataset has tens of thousands of observations, we tune `min_n` between 100-700. To get neat intervals, we tune `trees` between 10-70 because we set up our tuning grid with 7 levels.  
+
+```{r class.source = 'fold-show'}
+rf_grid <- grid_regular(mtry(range = c(1,7)), trees(range=c(10,70)), min_n(range = c(100,700)), levels = 7)
+```
+
+We tune and fit the model with repeated cross fold validation. As this process takes a while to execute, we will save our results. 
+
+```{r class.source = 'fold-show', eval=FALSE}
+rf_tune <- tune_grid(
+  rf_workflow,
+  resamples = sg_flat_folds,
+  grid = rf_grid)
+
+save(rf_tune, rf_workflow, file = "/Users/evanhu/Documents/UCSB Courses/Y4Q1/PSTAT 131/project/Data/Model Fitting/rf_tune.rda")
+```
+
+### Boosted Trees
+
+In a similar process as building our random forest model, we set up the boosted trees model with only one tuning parameter `trees`. We set engine to `"xgboost"` and set mode to `"regression"`. As before, we store our model and recipe in a workflow.
+
+```{r class.source = 'fold-show'}
+bt_model <- boost_tree(
+  trees = tune()) %>% 
+  set_engine("xgboost") %>%
+  set_mode("regression")
+
+bt_workflow <- workflow() %>% 
+  add_model(bt_model) %>% 
+  add_recipe(sg_flat_recipe)
+```
+
+We set up our tuning grid with `trees` ranging from 10-2000. 
+
+```{r class.source = 'fold-show'}
+bt_grid <- grid_regular(trees(range=c(10,2000)))
+```
+
+Then, we tune and fit the model with repeated cross fold validation. As this process takes a while to execute, we will save our results. 
+
+```{r class.source = 'fold-show', eval = FALSE}
+bt_tune <- tune_grid(
+  bt_workflow, 
+  resamples = sg_flat_folds,
+  grid = bt_grid)
+
+save(bt_tune, bt_workflow, file = "/Users/evanhu/Documents/UCSB Courses/Y4Q1/PSTAT 131/project/Data/Model Fitting/bt_tune.rda")
+```
+
+### K-Nearest Neighbors 
+
+Lastly, we set up the nearest neighbors model with one tuning parameter `neighbors`. We set engine to `"kknn"` and set mode to `"regression"`. As before, we store our model and recipe in a workflow.
+
+```{r class.source = 'fold-show'}
+knn_model <- nearest_neighbor(
+  neighbors = tune(),
+  mode = "regression") %>% 
+  set_engine("kknn")
+
+knn_workflow <- workflow() %>% 
+  add_model(knn_model) %>% 
+  add_recipe(sg_flat_recipe)
+```
+
+Like before, we set up our tuning grid. 
+
+```{r class.source = 'fold-show'}
+knn_params <- parameters(knn_model)
+knn_grid <- grid_regular(knn_params, levels = 4)
+```
+
+Then, we execute the model with repeated cross fold validation. As this process takes a while to execute, we will save our results. 
+
+```{r class.source = 'fold-show', eval=FALSE}
+knn_tune <- tune_grid(
+  knn_workflow,
+  resamples = sg_flat_folds,
+  grid = knn_grid)
+
+save(knn_tune, knn_workflow, file = "/Users/evanhu/Documents/UCSB Courses/Y4Q1/PSTAT 131/project/Data/Model Fitting/knn_tune.rda") 
+```
+
+### Linear Regression 
+
+The 3 models we fitted above all have high flexibility and good predictive power. However, models with higher flexibility have less interpretability. Thus, we will build one of the simplest machine learning models for our data: a linear regression model. We will create a new recipe as we will be removing all the categorical predictors that have many levels. This leaves only one categorical predictor in our recipe: `flat_type`, which has 7 levels. The rest of our predictors are numeric, so we end up with only 4 predictors. We center and scale our data as before. 
+
+```{r class.source = 'fold-show'}
+lm_recipe <- recipe(resale_price ~ flat_type + floor_area_sqm + lease_commence_date + year, data = sg_flat_train) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+```
+
+We set up the model. Then, we store the model and recipe into a workflow. 
+
+```{r class.source = 'fold-show'}
+lm_model <- linear_reg() %>% 
+  set_engine("lm")
+
+lm_wflow <- workflow() %>% 
+  add_model(lm_model) %>% 
+  add_recipe(lm_recipe)
+```
+
+Lastly, we fit the linear regression model onto our training data. The results of the linear regression fit are shown below. 
+
+```{r class.source = 'fold-show'}
+lm_fit <- fit(lm_wflow, sg_flat_train)
+lm_fit
+```
+
+## Model Analysis 
+
+Before we analyze the results of the models we made, we load the results of the models into our environment. 
+
+```{r class.source = 'fold-show'}
+# load in model results 
+load("/Users/evanhu/Documents/UCSB Courses/Y4Q1/PSTAT 131/project/Data/Model Fitting/rf_tune.rda")
+load("/Users/evanhu/Documents/UCSB Courses/Y4Q1/PSTAT 131/project/Data/Model Fitting/bt_tune.rda")
+load("/Users/evanhu/Documents/UCSB Courses/Y4Q1/PSTAT 131/project/Data/Model Fitting/knn_tune.rda")
+```
+
+### Random Forest Model
+
+```{r class.source = 'fold-show'}
+autoplot(rf_tune, metric = "rmse")
+```
+
+Looking at the results of the autoplot() function, it's clear that the root mean square error (RMSE) decreases as the number of randomly selected predictors (`mtry`) increases. 
+
+```{r class.source = 'fold-show'}
+show_best(rf_tune, metric = "rmse") %>% select(-.estimator, -.config)
+```
+
+Using the show_best() function, the smallest `mean` is 50933.18 with `mtry` = 7, `trees` = 60, and `min_n` = 100. This means that on average, we were about 50933.18 Singaporean dollars off from the true cost of a flat in Singapore.
+
+### Boosted Tree Model
+
+```{r class.source = 'fold-show'}
+autoplot(bt_tune, metric = "rmse")
+```
+
+Looking at the results of the autoplot() function, it's clear that the RMSE decreases as the number of `trees` increases.  
+
+```{r class.source = 'fold-show'}
+show_best(bt_tune, metric = "rmse") %>% select(-.estimator, -.config)
+```
+
+Using the show_best() function, the smallest `mean` is 31240.08 with `trees` = 2000. This means that on average, we were about 31240.08 Singaporean dollars off from the true cost of a flat in Singapore. This `mean` is lower than the `mean` from our random forest model. 
+
+### K-Nearest Neighbors Model 
+
+```{r class.source = 'fold-show'}
+autoplot(knn_tune, metric = "rmse")
+```
+
+Looking at the results of the autoplot() function, it's clear that the RMSE decreases as the number of `neighbors` increases.  
+
+```{r class.source = 'fold-show'}
+show_best(knn_tune, metric = "rmse") %>% select(-.estimator, -.config)
+```
+
+Using the show_best() function, the smallest `mean` is 42145.51 with `neighbors` = 10. This means that on average, we were about 42145.51 Singaporean dollars off from the true cost of a flat in Singapore. This `mean` is lower than the `mean` from our random forest model but higher than the `mean` from our boosted trees model.
+
+### Linear Regression Model
+
+```{r class.source = 'fold-show'}
+lm_res <- predict(lm_fit, new_data = sg_flat_train %>% select(-resale_price))
+lm_res <- bind_cols(lm_res, sg_flat_train %>% select(resale_price))
+
+rmse(lm_res, truth = resale_price, estimate =.pred)
+```
+
+We use the training data on the linear regression fit to determine the RMSE for this model. The calculated RMSE is 113903.5, which is higher than the average RMSE of our 3 other models. 
+
+Since our boosted trees model performed the best (has the lowest RMSE), we will choose that model as our final model.
+
+## Final Model Building
+
+We'll create a new workflow that has "tuned" in the name for identification purposes. We’ll finalize the workflow by taking the parameters from the boosted tree using the select_best() function.
+
+```{r class.source = 'fold-show'}
+bt_workflow_tuned <- bt_workflow %>% 
+  finalize_workflow(select_best(bt_tune, metric = "rmse"))
+```
+
+We run the fit and write out the results. 
+
+```{r class.source = 'fold-show', eval=FALSE}
+bt_results <- fit(bt_workflow_tuned, sg_flat_train)
+write_rds(bt_results, "/Users/evanhu/Documents/UCSB Courses/Y4Q1/PSTAT 131/project/Data/Model Fitting/bt_results_final_model.rds")
+```
+
+## Result of Final Model on Testing Dataset
+
+We load the results of our final model fit into the workspace.
+
+```{r class.source = 'fold-show'}
+final_model <- read_rds("/Users/evanhu/Documents/UCSB Courses/Y4Q1/PSTAT 131/project/Data/Model Fitting/bt_results_final_model.rds")
+flat_metric <- metric_set(rmse)
+
+model_test_predictions <- predict(final_model, new_data = sg_flat_test) %>% 
+  bind_cols(sg_flat_test %>% select(resale_price)) 
+
+model_test_predictions %>% 
+ flat_metric(truth = resale_price, estimate = .pred)
+```
+
+Our final model returned an RMSE of 31598.17 on the testing data, which is really close to the average RMSE 31240.08 of the same model on the training data. Thus, our boosted trees model did a great job of not overfitting to the training data.
+
+## Variable Importance Chart 
+
+```{r, class.source = 'fold-show'}
+final_model %>%
+  extract_fit_parsnip() %>%
+  vip()
+```
+
+As expected, `floor_area_sqm`is by far the most important variable in determining `resale_price`. Surprisingly, `storey_range` is not an important factor in determining the `resale_price` of a Singaporean flat. Moreover, not surprisingly, `lease_commence_date` is a somewhat important variable to consider for our data and model. From the correlation matrix from our EDA section, we noted that `lease_commence_date` has a somewhat strong correlation with `resale_price`. Only one level of `flat_type` and one level of `flat_model` held some importance in this model. We had expected that the levels of `flat_type` and `flat_model` would have more weight in determining `resale_price`. Furthermore, as we expected, the variable importance chart lists some of the levels of `town` as having a bit of importance in determining the response variable. We had expected that the location of a property would be an important variable for modeling our data. 
+
+Some consideration for improving our model is adding more predictors. The first 3 models we fitted to the training data had 7 predictors and the linear regression model only had 4 predictors. We can see that our models don't have many predictors. More than half of our predictors are categorical variables with many levels. According to the variable importance chart, it seems that most of these categorical variables had very low importance in determining the price of a flat in Singapore. Thus, the data may need some more useful variables to help determine the price of flats.  
+
+The boosted trees model did not perform poorly, but it didn't perform well either. Though we might consider other machine learning models for this data, we must take into consideration computing power and complexity of the models. Though higher complexity models may perform better and have better predictive accuracy, these models require a hefty amount of time to execute and are harder to interpret. Moreover, the choice of models for a dataset is based on the goals and objectives of the one building the model and doing the analysis. 
+
+## Conclusion 
+
+After testing different models, we ultimately ended up with choosing the boosted trees model when comparing the root mean square error of our models. We tried building a machine learning model with accurate predictive power, but it didn't perform that well but nor did it perform poorly. The chosen model of boosted trees placed the most importance on the variable `resale_price` when determining the response variable `resale_price`, which makes sense. However, not much importance was placed on the other variables. 
+
+Overall, the Singapore flat prices dataset provided an opportunity for me to build my experiences and skills with machine learning techniques while learning more about a city that I would love to visit and see with my own eyes. 
+
